@@ -1,5 +1,4 @@
 import streamlit as st
-import MySQLdb
 import pandas as pd
 from datetime import datetime, timedelta
 import uuid
@@ -7,6 +6,7 @@ import os
 import io
 import sqlite3
 import tempfile
+import shutil
 
 # Importación de ReportLab para generar tickets en PDF
 from reportlab.lib.pagesizes import mm
@@ -15,7 +15,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # --- CONFIGURACIÓN DE PÁGINA (ESTILO ILUSION) ---
-st.set_page_config(page_title="Abarrotes EL PINO - LogShinee MySQL", layout="wide", page_icon="🌲")
+st.set_page_config(page_title="Abarrotes EL PINO - LogShinee", layout="wide", page_icon="🌲")
 
 # --- ESTILOS CSS CON PALETA VERDE/BEIGE ---
 st.markdown("""
@@ -52,97 +52,92 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- CONEXIÓN A BASE DE DATOS MYSQL ---
-MYSQL_HOST = 'localhost'
-MYSQL_USER = 'root'
-MYSQL_PASSWORD = ''
-MYSQL_DB = 'tiendita'
+# --- CONEXIÓN A BASE DE DATOS SQLITE ---
+DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'elpino_v1.db')
 
 
-def get_mysql_connection():
-    return MySQLdb.connect(
-        host=MYSQL_HOST,
-        user=MYSQL_USER,
-        passwd=MYSQL_PASSWORD,
-        db=MYSQL_DB,
-        charset='utf8'
-    )
+def get_db_connection():
+    return sqlite3.connect(DB_FILE)
 
 
 def init_db():
     try:
-        conn = get_mysql_connection()
+        conn = get_db_connection()
         cursor = conn.cursor()
 
         # 0. Tabla de Usuarios para Autenticación
         cursor.execute('''CREATE TABLE IF NOT EXISTS usuarios 
-                          (id INT AUTO_INCREMENT PRIMARY KEY,
-                           username VARCHAR(255) UNIQUE NOT NULL, 
-                           password VARCHAR(255) NOT NULL)''')
+                          (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                           username TEXT UNIQUE NOT NULL, 
+                           password TEXT NOT NULL)''')
 
         # Insertar usuario por defecto 'admin' / 'password' si la tabla está vacía
         cursor.execute("SELECT COUNT(*) FROM usuarios")
         if cursor.fetchone()[0] == 0:
-            cursor.execute("INSERT INTO usuarios (username, password) VALUES (%s, %s)", ('admin', 'password'))
+            cursor.execute("INSERT INTO usuarios (username, password) VALUES (?, ?)", ('admin', 'password'))
 
         # 1. Tabla de Proveedores
         cursor.execute('''CREATE TABLE IF NOT EXISTS proveedores 
-                          (id INT AUTO_INCREMENT PRIMARY KEY,
-                           nombre VARCHAR(255) UNIQUE, contacto VARCHAR(255), telefono VARCHAR(255))''')
+                          (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                           nombre TEXT UNIQUE, contacto TEXT, telefono TEXT)''')
 
         # 2. Tabla de Inventario / Compras
         cursor.execute('''CREATE TABLE IF NOT EXISTS inventario 
-                          (codigo VARCHAR(255) PRIMARY KEY, producto VARCHAR(255), marca VARCHAR(255), 
-                           modelo VARCHAR(255), presentacion VARCHAR(255), categoria VARCHAR(255), 
-                           unidad VARCHAR(50), stock DOUBLE, stock_minimo DOUBLE, p_compra DOUBLE, 
-                           p_venta DOUBLE, proveedor_id INT,
+                          (codigo TEXT PRIMARY KEY, producto TEXT, marca TEXT, 
+                           modelo TEXT, presentacion TEXT, categoria TEXT, 
+                           unidad TEXT, stock REAL, stock_minimo REAL, p_compra REAL, 
+                           p_venta REAL, proveedor_id INTEGER,
                            FOREIGN KEY(proveedor_id) REFERENCES proveedores(id))''')
 
+        cursor.execute("PRAGMA table_info(inventario)")
+        existing_inv_cols = [col[1] for col in cursor.fetchall()]
         cols_inventario = {
-            'marca': "ALTER TABLE inventario ADD COLUMN marca VARCHAR(255) DEFAULT ''",
-            'modelo': "ALTER TABLE inventario ADD COLUMN modelo VARCHAR(255) DEFAULT ''",
-            'presentacion': "ALTER TABLE inventario ADD COLUMN presentacion VARCHAR(255) DEFAULT ''"
+            'marca': "ALTER TABLE inventario ADD COLUMN marca TEXT DEFAULT ''",
+            'modelo': "ALTER TABLE inventario ADD COLUMN modelo TEXT DEFAULT ''",
+            'presentacion': "ALTER TABLE inventario ADD COLUMN presentacion TEXT DEFAULT ''"
         }
         for col, query_alter in cols_inventario.items():
-            cursor.execute(f"SHOW COLUMNS FROM inventario LIKE '{col}'")
-            if not cursor.fetchone():
+            if col not in existing_inv_cols:
                 cursor.execute(query_alter)
 
         # 3. Tabla de Ventas
         cursor.execute('''CREATE TABLE IF NOT EXISTS ventas 
-                          (transaccion_id VARCHAR(255), cliente_dni VARCHAR(255), fecha VARCHAR(50), 
-                           hora VARCHAR(50), codigo VARCHAR(255), producto VARCHAR(255), 
-                           cantidad DOUBLE, p_venta DOUBLE, total DOUBLE, estado VARCHAR(50))''')
+                          (transaccion_id TEXT, cliente_dni TEXT, fecha TEXT, 
+                           hora TEXT, codigo TEXT, producto TEXT, 
+                           cantidad REAL, p_venta REAL, total REAL, estado TEXT)''')
 
+        cursor.execute("PRAGMA table_info(ventas)")
+        existing_ventas_cols = [col[1] for col in cursor.fetchall()]
         cols_ventas = {
-            'transaccion_id': "ALTER TABLE ventas ADD COLUMN transaccion_id VARCHAR(255) DEFAULT ''",
-            'hora': "ALTER TABLE ventas ADD COLUMN hora VARCHAR(50) DEFAULT '00:00'",
-            'codigo': "ALTER TABLE ventas ADD COLUMN codigo VARCHAR(255) DEFAULT ''",
-            'producto': "ALTER TABLE ventas ADD COLUMN producto VARCHAR(255) DEFAULT ''",
-            'p_venta': "ALTER TABLE ventas ADD COLUMN p_venta DOUBLE DEFAULT 0.0",
-            'total': "ALTER TABLE ventas ADD COLUMN total DOUBLE DEFAULT 0.0",
-            'estado': "ALTER TABLE ventas ADD COLUMN estado VARCHAR(50) DEFAULT 'COMPLETADA'"
+            'transaccion_id': "ALTER TABLE ventas ADD COLUMN transaccion_id TEXT DEFAULT ''",
+            'cliente_dni': "ALTER TABLE ventas ADD COLUMN cliente_dni TEXT DEFAULT 'CF'",
+            'fecha': "ALTER TABLE ventas ADD COLUMN fecha TEXT DEFAULT ''",
+            'hora': "ALTER TABLE ventas ADD COLUMN hora TEXT DEFAULT '00:00'",
+            'codigo': "ALTER TABLE ventas ADD COLUMN codigo TEXT DEFAULT ''",
+            'producto': "ALTER TABLE ventas ADD COLUMN producto TEXT DEFAULT ''",
+            'p_venta': "ALTER TABLE ventas ADD COLUMN p_venta REAL DEFAULT 0.0",
+            'total': "ALTER TABLE ventas ADD COLUMN total REAL DEFAULT 0.0",
+            'estado': "ALTER TABLE ventas ADD COLUMN estado TEXT DEFAULT 'COMPLETADA'"
         }
         for col, query_alter in cols_ventas.items():
-            cursor.execute(f"SHOW COLUMNS FROM ventas LIKE '{col}'")
-            if not cursor.fetchone():
+            if col not in existing_ventas_cols:
                 cursor.execute(query_alter)
 
         # 4. Tabla para Almacenar Datos Generales de Tickets
         cursor.execute('''CREATE TABLE IF NOT EXISTS tickets 
-                          (transaccion_id VARCHAR(255) PRIMARY KEY, cliente_dni VARCHAR(255), 
-                           fecha VARCHAR(50), hora VARCHAR(50), total DOUBLE, pago_con DOUBLE, 
-                           cambio DOUBLE)''')
+                          (transaccion_id TEXT PRIMARY KEY, cliente_dni TEXT, 
+                           fecha TEXT, hora TEXT, total REAL, pago_con REAL, 
+                           cambio REAL)''')
 
         conn.commit()
         cursor.close()
         conn.close()
     except Exception as e:
-        st.error(f"Error al conectar/actualizar MySQL: {e}")
+        st.error(f"Error al conectar/actualizar SQLite: {e}")
 
 
 def run_query(query, params=()):
-    conn = get_mysql_connection()
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(query, params)
     conn.commit()
@@ -151,7 +146,7 @@ def run_query(query, params=()):
 
 
 def get_df(query, params=()):
-    conn = get_mysql_connection()
+    conn = get_db_connection()
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
     return df
@@ -231,14 +226,14 @@ if 'carrito' not in st.session_state:
 if 'ultimo_ticket' not in st.session_state:
     st.session_state.ultimo_ticket = None
 
-# --- LOGIN CON VALIDACIÓN DESDE MYSQL ---
+# --- LOGIN CON VALIDACIÓN DESDE SQLITE ---
 if not st.session_state.logged_in:
-    st.title("🔐 Iniciar Sesión - Abarrotes EL PINO (MySQL)")
+    st.title("🔐 Iniciar Sesión - Abarrotes EL PINO")
     with st.form("login_form"):
         username = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
         if st.form_submit_button("Ingresar"):
-            df_usr = get_df("SELECT * FROM usuarios WHERE username = %s AND password = %s", (username, password))
+            df_usr = get_df("SELECT * FROM usuarios WHERE username = ? AND password = ?", (username, password))
             if not df_usr.empty:
                 st.session_state.logged_in = True
                 st.session_state.usuario_actual = username
@@ -338,14 +333,14 @@ if choice == "🛒 Punto de Venta":
 
                     for i in st.session_state.carrito:
                         run_query(
-                            "INSERT INTO ventas (transaccion_id, cliente_dni, fecha, hora, codigo, producto, cantidad, p_venta, total, estado) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                            "INSERT INTO ventas (transaccion_id, cliente_dni, fecha, hora, codigo, producto, cantidad, p_venta, total, estado) VALUES (?,?,?,?,?,?,?,?,?,?)",
                             (t_id, cliente_dni, now.strftime("%Y-%m-%d"), now.strftime("%H:%M"),
                              i['codigo'], i['producto'], i['cantidad'], i['precio'], i['subtotal'], "COMPLETADA"))
-                        run_query("UPDATE inventario SET stock = stock - %s WHERE codigo=%s",
+                        run_query("UPDATE inventario SET stock = stock - ? WHERE codigo=?",
                                   (i['cantidad'], i['codigo']))
 
                     run_query(
-                        "INSERT INTO tickets (transaccion_id, cliente_dni, fecha, hora, total, pago_con, cambio) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                        "INSERT INTO tickets (transaccion_id, cliente_dni, fecha, hora, total, pago_con, cambio) VALUES (?,?,?,?,?,?,?)",
                         (t_id, cliente_dni, now.strftime("%Y-%m-%d"), now.strftime("%H:%M"), total_v, pago_con, cambio))
 
                     pdf_bytes = generar_pdf_ticket(t_id, cliente_dni, st.session_state.carrito, total_v, pago_con,
@@ -361,10 +356,12 @@ if choice == "🛒 Punto de Venta":
                 st.download_button("📄 Descargar Ticket PDF", data=st.session_state.ultimo_ticket["bytes"],
                                    file_name=f"Ticket_{st.session_state.ultimo_ticket['id']}.pdf",
                                    mime="application/pdf")
+    else:
+        st.info("No hay productos con stock disponible en el inventario.")
 
 # --- 2. INVENTARIO / COMPRAS ---
 elif choice == "📦 Inventario / Compras":
-    st.title("📦 Control de Inventario (MySQL)")
+    st.title("📦 Control de Inventario")
     search_q = st.text_input("🔍 Buscar por Código de Producto:")
 
     query_inv = """SELECT i.codigo, i.producto, i.marca, i.modelo, i.presentacion, i.categoria, 
@@ -372,7 +369,7 @@ elif choice == "📦 Inventario / Compras":
                    FROM inventario i LEFT JOIN proveedores p ON i.proveedor_id = p.id"""
 
     if search_q:
-        df_inv_res = get_df(query_inv + " WHERE i.codigo LIKE %s", (f"%{search_q}%",))
+        df_inv_res = get_df(query_inv + " WHERE i.codigo LIKE ?", (f"%{search_q}%",))
     else:
         df_inv_res = get_df(query_inv)
 
@@ -393,7 +390,7 @@ elif choice == "🚚 Proveedores":
             if st.form_submit_button("Guardar Proveedor"):
                 if nom.strip():
                     try:
-                        run_query("INSERT INTO proveedores (nombre, contacto, telefono) VALUES (%s,%s,%s)",
+                        run_query("INSERT INTO proveedores (nombre, contacto, telefono) VALUES (?,?,?)",
                                   (nom, contacto, tel))
                         st.success("Proveedor guardado.")
                         reload_app()
@@ -413,7 +410,7 @@ elif choice == "📊 Corte de Caja":
         fecha_inicio = hoy.strftime("%Y-%m-01")
 
     df_corte = get_df(
-        "SELECT v.*, i.p_compra FROM ventas v LEFT JOIN inventario i ON v.codigo = i.codigo WHERE v.fecha >= %s AND v.estado = 'COMPLETADA'",
+        "SELECT v.*, i.p_compra FROM ventas v LEFT JOIN inventario i ON v.codigo = i.codigo WHERE v.fecha >= ? AND v.estado = 'COMPLETADA'",
         (fecha_inicio,))
 
     if not df_corte.empty:
@@ -438,7 +435,7 @@ elif choice == "📉 Historial":
 
 # --- 6. REGISTRAR PRODUCTO ---
 elif choice == "🛠️ Registrar Producto":
-    st.title("🛠 Registrar Producto en MySQL")
+    st.title("🛠️ Registrar Producto")
     df_prov = get_df("SELECT id, nombre FROM proveedores")
     dict_prov = dict(zip(df_prov['nombre'], df_prov['id'])) if not df_prov.empty else {}
 
@@ -466,17 +463,15 @@ elif choice == "🛠️ Registrar Producto":
         if st.form_submit_button("Guardar Producto"):
             if cod and prod:
                 p_id = dict_prov.get(prov_nom, None)
-                query = """INSERT INTO inventario (codigo, producto, marca, modelo, presentacion, categoria, unidad, stock, stock_minimo, p_compra, p_venta, proveedor_id) 
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE 
-                           producto=VALUES(producto), marca=VALUES(marca), modelo=VALUES(modelo), presentacion=VALUES(presentacion),
-                           categoria=VALUES(categoria), unidad=VALUES(unidad), stock=VALUES(stock), stock_minimo=VALUES(stock_minimo),
-                           p_compra=VALUES(p_compra), p_venta=VALUES(p_venta), proveedor_id=VALUES(proveedor_id)"""
+                query = """INSERT OR REPLACE INTO inventario 
+                           (codigo, producto, marca, modelo, presentacion, categoria, unidad, stock, stock_minimo, p_compra, p_venta, proveedor_id) 
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""
                 run_query(query, (cod, prod, marca, modelo, presentacion, cat, uni, stk, stk_min, pc, pv, p_id))
-                st.success(f"Producto '{prod}' guardado en MySQL.")
+                st.success(f"Producto '{prod}' guardado correctamente.")
 
 # --- 7. RESPALDOS Y RESTAURACIÓN ---
 elif choice == "💾 Respaldos":
-    st.title("💾 Respaldos y Restauración de Base de Datos (MySQL)")
+    st.title("💾 Respaldos y Restauración de Base de Datos")
 
     st.markdown("---")
     st.subheader("🧾 Guardado y Respaldo de Tickets Registrados")
@@ -501,171 +496,46 @@ elif choice == "💾 Respaldos":
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("📥 Exportar Copia de Seguridad Completa")
-        st.write("Genera un archivo `.sql` con la estructura y todos los datos actuales de MySQL.")
+        st.subheader("📥 Exportar Copia de Seguridad (.db)")
+        st.write("Descarga una copia exacta de tu archivo de base de datos SQLite (`elpino_v1.db`).")
 
-        if st.button("📦 Generar Respaldo SQL"):
-            try:
-                conn = get_mysql_connection()
-                cursor = conn.cursor()
-
-                sql_dump = f"-- Respaldo de Base de Datos: {MYSQL_DB}\n"
-                sql_dump += f"-- Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-
-                cursor.execute("SHOW TABLES")
-                tablas = [row[0] for row in cursor.fetchall()]
-
-                for tabla in tablas:
-                    cursor.execute(f"SHOW CREATE TABLE `{tabla}`")
-                    create_table_sql = cursor.fetchall()[0][1]
-                    sql_dump += f"DROP TABLE IF EXISTS `{tabla}`;\n"
-                    sql_dump += f"{create_table_sql};\n\n"
-
-                    cursor.execute(f"SELECT * FROM `{tabla}`")
-                    filas = cursor.fetchall()
-                    if filas:
-                        cursor.execute(f"SHOW COLUMNS FROM `{tabla}`")
-                        cols = [f"`{c[0]}`" for c in cursor.fetchall()]
-                        cols_str = ", ".join(cols)
-
-                        for fila in filas:
-                            valores = []
-                            for val in fila:
-                                if val is None:
-                                    valores.append("NULL")
-                                elif isinstance(val, (int, float)):
-                                    valores.append(str(val))
-                                else:
-                                    val_esc = str(val).replace("'", "''").replace("\\", "\\\\")
-                                    valores.append(f"'{val_esc}'")
-
-                            val_str = ", ".join(valores)
-                            sql_dump += f"INSERT INTO `{tabla}` ({cols_str}) VALUES ({val_str});\n"
-                        sql_dump += "\n"
-
-                cursor.close()
-                conn.close()
-
-                st.download_button(
-                    label="💾 Descargar Respaldo (.sql)",
-                    data=sql_dump,
-                    file_name=f"Respaldo_Tiendita_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql",
-                    mime="application/sql"
-                )
-                st.success("¡Respaldo generado con éxito!")
-
-            except Exception as e:
-                st.error(f"Error al exportar la base de datos: {e}")
+        if os.path.exists(DB_FILE):
+            with open(DB_FILE, "rb") as f:
+                db_bytes = f.read()
+            st.download_button(
+                label="💾 Descargar Base de Datos (.db)",
+                data=db_bytes,
+                file_name=f"Respaldo_elpino_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+                mime="application/octet-stream"
+            )
 
     with col2:
-        st.subheader("📤 Restaurar desde Archivo Respaldo (.sql o .db)")
-        st.write("Sube tu archivo `.sql` o `.db` (SQLite) para volcar la información a MySQL.")
+        st.subheader("📤 Restaurar desde Archivo Respaldo (.db)")
+        st.write("Sube tu archivo `.db` para reemplazar o cargar tus datos.")
 
-        archivo_respaldo = st.file_uploader("Selecciona un archivo .sql o .db", type=["sql", "db"])
+        archivo_respaldo = st.file_uploader("Selecciona un archivo .db", type=["db"])
 
         if archivo_respaldo is not None:
             if st.button("🚀 Confirmar y Restaurar Datos"):
-                nombre_archivo = archivo_respaldo.name.lower()
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp_file:
+                        tmp_file.write(archivo_respaldo.getvalue())
+                        tmp_path = tmp_file.name
 
-                if nombre_archivo.endswith(".sql"):
-                    try:
-                        contenido_sql = archivo_respaldo.getvalue().decode("utf-8")
-                        conn = get_mysql_connection()
-                        cursor = conn.cursor()
+                    shutil.copyfile(tmp_path, DB_FILE)
+                    os.remove(tmp_path)
+                    init_db()
 
-                        sentencias = contenido_sql.split(";")
-                        for sentencia in sentencias:
-                            sentencia_limpia = sentencia.strip()
-                            if sentencia_limpia and not sentencia_limpia.startswith("--"):
-                                cursor.execute(sentencia_limpia)
-
-                        conn.commit()
-                        cursor.close()
-                        conn.close()
-                        st.success("¡Base de datos restaurada correctamente desde el archivo SQL!")
-                        reload_app()
-                    except Exception as e:
-                        st.error(f"Error al restaurar archivo SQL: {e}")
-
-                elif nombre_archivo.endswith(".db"):
-                    try:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp_file:
-                            tmp_file.write(archivo_respaldo.getvalue())
-                            tmp_path = tmp_file.name
-
-                        sqlite_conn = sqlite3.connect(tmp_path)
-                        mysql_conn = get_mysql_connection()
-                        mysql_cursor = mysql_conn.cursor()
-
-
-                        def clean_val(v, default=None):
-                            return default if pd.isna(v) else v
-
-
-                        try:
-                            df_prov = pd.read_sql_query("SELECT * FROM proveedores", sqlite_conn)
-                            df_prov = df_prov.where(pd.notnull(df_prov), None)
-                            for _, r in df_prov.iterrows():
-                                mysql_cursor.execute(
-                                    "INSERT INTO proveedores (id, nombre, contacto, telefono) VALUES (%s, %s, %s, %s) ON DUPLICATE KEY UPDATE nombre=VALUES(nombre)",
-                                    (clean_val(r.get('id')), clean_val(r.get('nombre'), ''),
-                                     clean_val(r.get('contacto'), ''), clean_val(r.get('telefono'), ''))
-                                )
-                        except Exception:
-                            pass
-
-                        try:
-                            df_inv = pd.read_sql_query("SELECT * FROM inventario", sqlite_conn)
-                            df_inv = df_inv.where(pd.notnull(df_inv), None)
-                            for _, r in df_inv.iterrows():
-                                mysql_cursor.execute(
-                                    """INSERT INTO inventario (codigo, producto, marca, modelo, presentacion, categoria, unidad, stock, stock_minimo, p_compra, p_venta, proveedor_id)
-                                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                       ON DUPLICATE KEY UPDATE producto=VALUES(producto), stock=VALUES(stock), p_venta=VALUES(p_venta)""",
-                                    (clean_val(r.get('codigo'), ''), clean_val(r.get('producto'), ''),
-                                     clean_val(r.get('marca'), ''), clean_val(r.get('modelo'), ''),
-                                     clean_val(r.get('presentacion'), ''),
-                                     clean_val(r.get('categoria'), 'Abarrotes'), clean_val(r.get('unidad'), 'Pieza'),
-                                     clean_val(r.get('stock'), 0.0), clean_val(r.get('stock_minimo'), 5.0),
-                                     clean_val(r.get('p_compra'), 0.0), clean_val(r.get('p_venta'), 0.0),
-                                     clean_val(r.get('proveedor_id')))
-                                )
-                        except Exception:
-                            pass
-
-                        try:
-                            df_ventas = pd.read_sql_query("SELECT * FROM ventas", sqlite_conn)
-                            df_ventas = df_ventas.where(pd.notnull(df_ventas), None)
-                            for _, r in df_ventas.iterrows():
-                                mysql_cursor.execute(
-                                    """INSERT INTO ventas (transaccion_id, cliente_dni, fecha, hora, codigo, producto, cantidad, p_venta, total, estado)
-                                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                                    (clean_val(r.get('transaccion_id'), ''), clean_val(r.get('cliente_dni'), 'CF'),
-                                     clean_val(r.get('fecha'), ''), clean_val(r.get('hora'), ''),
-                                     clean_val(r.get('codigo'), ''), clean_val(r.get('producto'), ''),
-                                     clean_val(r.get('cantidad'), 1.0), clean_val(r.get('p_venta'), 0.0),
-                                     clean_val(r.get('total'), 0.0), clean_val(r.get('estado'), 'COMPLETADA'))
-                                )
-                        except Exception:
-                            pass
-
-                        mysql_conn.commit()
-                        mysql_cursor.close()
-                        mysql_conn.close()
-                        sqlite_conn.close()
-                        os.remove(tmp_path)
-
-                        st.success("¡Respaldo .db (SQLite) migrado y cargado exitosamente a MySQL!")
-                        reload_app()
-                    except Exception as e:
-                        st.error(f"Error al migrar archivo .db a MySQL: {e}")
+                    st.success("¡Base de datos .db restaurada correctamente!")
+                    reload_app()
+                except Exception as e:
+                    st.error(f"Error al restaurar archivo .db: {e}")
 
 # --- 8. CONFIGURACIÓN DE CUENTA DE USUARIO ---
 elif choice == "👤 Mi Cuenta":
     st.title("👤 Configuración de la Cuenta de Acceso")
     st.write("Cambia tu nombre de usuario o contraseña para acceder al sistema.")
 
-    # Cargar datos actuales del usuario en sesión
     usr_actual = st.session_state.usuario_actual
 
     with st.form("form_mi_cuenta"):
@@ -680,8 +550,7 @@ elif choice == "👤 Mi Cuenta":
             elif not pass_actual:
                 st.error("Ingresa tu contraseña actual para confirmar los cambios.")
             else:
-                # Verificar credenciales actuales
-                df_check = get_df("SELECT * FROM usuarios WHERE username = %s AND password = %s",
+                df_check = get_df("SELECT * FROM usuarios WHERE username = ? AND password = ?",
                                   (usr_actual, pass_actual))
 
                 if df_check.empty:
@@ -691,13 +560,13 @@ elif choice == "👤 Mi Cuenta":
                         if pass_nueva != pass_confirmar:
                             st.error("La nueva contraseña y la confirmación no coinciden.")
                         else:
-                            run_query("UPDATE usuarios SET username = %s, password = %s WHERE username = %s",
+                            run_query("UPDATE usuarios SET username = ?, password = ? WHERE username = ?",
                                       (nuevo_usuario.strip(), pass_nueva, usr_actual))
                             st.session_state.usuario_actual = nuevo_usuario.strip()
                             st.success("¡Usuario y contraseña actualizados con éxito!")
                             reload_app()
                     else:
-                        run_query("UPDATE usuarios SET username = %s WHERE username = %s",
+                        run_query("UPDATE usuarios SET username = ? WHERE username = ?",
                                   (nuevo_usuario.strip(), usr_actual))
                         st.session_state.usuario_actual = nuevo_usuario.strip()
                         st.success("¡Nombre de usuario actualizado con éxito!")
